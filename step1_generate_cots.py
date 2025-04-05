@@ -26,28 +26,7 @@ output_path = "results/deepseek_r1_cots_iphr.json"  # Path to save the generated
 save_every = 1  # Save intermediate results every N batches
 
 # Filtering parameters
-prop_ids = [
-    'sound-speeds',
-    'train-speeds',
-    'aircraft-speeds',
-    'animals-speed',
-    'element-densities',
-    'tunnel-lengths',
-    'structure-completion',
-    'boiling-points',
-    'celebrity-heights',
-    'wm-book-length',
-    'element-numbers',
-    'mountain-heights',
-    'tech-releases',
-    'first-flights',
-    'melting-points',
-    'bridge-lengths',
-    'satellite-launches',
-    'skyscraper-heights',
-    'river-lengths',
-    'sea-depths'
-]  # Filter questions by property IDs (e.g., ['wm-us-county-lat']), set to None to include all
+prop_ids = None  # Filter questions by property IDs (e.g., ['wm-us-county-lat']), set to None to include all
 comparison = None  # Filter questions by comparison type ('gt' or 'lt'), set to None to include all
 answer = None  # Filter questions by expected answer ('YES' or 'NO'), set to None to include all
 
