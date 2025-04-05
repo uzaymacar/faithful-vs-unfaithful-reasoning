@@ -82,7 +82,8 @@ def load_yaml_files(data_dir):
     return all_cots
 
 # Load the CoT data from YAML files
-data_dir = 'data/Qwen2.5-1.5B-Instruct'
+model_name = 'Llama-3.1-8B-Instruct'  # Change to 'Qwen2.5-1.5B-Instruct' for the other model
+data_dir = f'data/{model_name}'
 cots = load_yaml_files(data_dir)
 
 # Filter to only include examples with explicit faithfulness labels
@@ -220,11 +221,18 @@ analyze_label_distribution(train_cots, "Train")
 analyze_label_distribution(val_cots, "Validation")
 analyze_label_distribution(test_cots, "Test")
 
-# Load the Qwen model
-model_name = 'Qwen/Qwen2.5-1.5B-Instruct'
-qwen_model = HookedTransformer.from_pretrained(model_name)
-qwen_model = qwen_model.to(device)
-qwen_model.eval()  # Set to evaluation mode
+# Load the appropriate model based on model_name
+if model_name == 'Qwen2.5-1.5B-Instruct':
+    model_path = 'Qwen/Qwen2.5-1.5B-Instruct'
+elif model_name == 'Llama-3.1-8B-Instruct':
+    model_path = 'meta-llama/Llama-3.1-8B-Instruct'
+else:
+    raise ValueError(f"Unsupported model: {model_name}")
+
+print(f"Loading {model_path}...")
+llm_model = HookedTransformer.from_pretrained(model_path)
+llm_model = llm_model.to(device)
+llm_model.eval()  # Set to evaluation mode
 
 # Function to extract residual stream activations
 def extract_residual_activations(cot, model, layer_indices=None, max_length=512):
@@ -260,7 +268,13 @@ def extract_residual_activations(cot, model, layer_indices=None, max_length=512)
     return stacked_activations, tokens.shape[1] - 1  # -1 to exclude BOS token
 
 # Define which layers to use for classification
-layer_indices = [0, 5, 10, 15, 20, 25]  # Example: use a subset of layers
+layer_indices = None
+if model_name == 'Qwen2.5-1.5B-Instruct':
+    layer_indices = [0, 5, 10, 15, 20, 25] 
+elif model_name == 'Llama-3.1-8B-Instruct':
+    layer_indices = [0, 7, 14, 21, 28]
+else:
+    raise ValueError(f"Unsupported model: {model_name}")
 print(f"Using layers: {layer_indices}")
 
 # Extract activations for all examples
@@ -268,7 +282,7 @@ print("Extracting activations...")
 train_activations = []
 for cot in tqdm(train_cots, desc="Extracting train activations"):
     try:
-        activations, seq_length = extract_residual_activations(cot, qwen_model, layer_indices)
+        activations, seq_length = extract_residual_activations(cot, llm_model, layer_indices)
         train_activations.append({
             'activations': activations,
             'label': 1 if cot['is_faithful'] else 0,
@@ -280,7 +294,7 @@ for cot in tqdm(train_cots, desc="Extracting train activations"):
 val_activations = []
 for cot in tqdm(val_cots, desc="Extracting validation activations"):
     try:
-        activations, seq_length = extract_residual_activations(cot, qwen_model, layer_indices)
+        activations, seq_length = extract_residual_activations(cot, llm_model, layer_indices)
         val_activations.append({
             'activations': activations,
             'label': 1 if cot['is_faithful'] else 0,
@@ -292,7 +306,7 @@ for cot in tqdm(val_cots, desc="Extracting validation activations"):
 test_activations = []
 for cot in tqdm(test_cots, desc="Extracting test activations"):
     try:
-        activations, seq_length = extract_residual_activations(cot, qwen_model, layer_indices)
+        activations, seq_length = extract_residual_activations(cot, llm_model, layer_indices)
         test_activations.append({
             'activations': activations,
             'label': 1 if cot['is_faithful'] else 0,
@@ -404,7 +418,7 @@ class Classifier(nn.Module):
         return logits
 
 # Initialize the classifier
-hidden_dim = qwen_model.cfg.d_model
+hidden_dim = llm_model.cfg.d_model
 classifier = Classifier(hidden_dim).to(device)
 
 # Training parameters
@@ -549,10 +563,10 @@ plt.title('Training and Validation Accuracy')
 plt.legend()
 
 plt.tight_layout()
-plt.savefig('figures/training_curves.png')
+plt.savefig(f'figures/{model_name.lower()}_training_curves.png')
 plt.show()
 
-print("Training curves saved to figures/training_curves.png")
+print(f"Training curves saved to figures/{model_name.lower()}_training_curves.png")
 
 # Load best model for evaluation
 classifier.load_state_dict(best_model)
@@ -590,10 +604,11 @@ print(f"Precision: {test_precision:.4f}")
 print(f"Recall: {test_recall:.4f}")
 print(f"F1 Score: {test_f1:.4f}")
 
-# Save the model
+# Save the model with model name in the filename
 os.makedirs('saved_models', exist_ok=True)
-torch.save(classifier.state_dict(), f'saved_models/faithful_unfaithful_classifier_qwen_{"_".join(str(i) for i in layer_indices)}.pt')
-print(f"Model saved to saved_models/faithful_unfaithful_classifier_qwen_{'_'.join(str(i) for i in layer_indices)}.pt")
+model_filename = f'saved_models/faithful_unfaithful_classifier_{model_name.lower()}_{"_".join(str(i) for i in layer_indices)}.pt'
+torch.save(classifier.state_dict(), model_filename)
+print(f"Model saved to {model_filename}")
 
 # Feature importance analysis
 def analyze_feature_importance(model, dataloader, device):
@@ -682,7 +697,7 @@ plt.ylabel('Importance Score')
 plt.title('Layer Importance for Faithful versus Unfaithful Classification')
 plt.xticks(rotation=45)
 plt.tight_layout()
-plt.savefig('figures/qwen_layer_importance.png')
+plt.savefig(f'figures/{model_name.lower()}_layer_importance.png')
 plt.show()
 
 # Plot position importance
@@ -696,7 +711,7 @@ plt.xlabel('Position')
 plt.ylabel('Importance Score')
 plt.title('Position Importance for Faithful versus Unfaithful Classification')
 plt.tight_layout()
-plt.savefig('figures/qwen_position_importance.png')
+plt.savefig(f'figures/{model_name.lower()}_position_importance.png')
 plt.show()
 
-print("Analysis complete. Results saved to figures/qwen_layer_importance.png and figures/qwen_position_importance.png")
+print(f"Analysis complete. Results saved to figures/{model_name.lower()}_layer_importance.png and figures/{model_name.lower()}_position_importance.png")
