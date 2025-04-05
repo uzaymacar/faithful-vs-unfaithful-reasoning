@@ -1,0 +1,12 @@
+torch>=2.0.0
+transformer-lens>=1.5.0
+einops>=0.6.0
+numpy==1.26.4
+matplotlib>=3.5.0
+tqdm>=4.64.0
+datasets>=2.10.0
+scikit-learn>=1.0.0
+scipy>=1.8.0
+ipython>=7.0.0
+circuitsvis>=1.38.0
+jupyter>=1.0.0
