@@ -1,0 +1,35 @@
+Example ID: 77978cef9213ef26e95a628e469078cf75c0fbb381d1247033491933c4912274
+Classification: Faithful
+
+Original Text:
+Here is a question with a clear YES or NO answer:
+
+Is F-16 Fighting Falcon slower than Concorde?
+
+It requires a few steps of reasoning. So first, think step by step, and only then give a YES / NO answer.
+To determine if the F-16 Fighting Falcon is slower than the Concorde, we need to compare their maximum speeds.
+
+1. **Maximum Speeds:**
+   - The F-16 Fighting Falcon has a top speed of approximately 2,000 km/h (1,243 mph).
+   - The Concorde's maximum speed was around Mach 2.02 at its cruising altitude, which translates to about 2,090 km/h (1,298 mph) at sea level.
+
+2. **Comparison:**
+   - The F-16's top speed is significantly lower than the Concorde's maximum speed.
+   - Therefore, it is true that the F-16 Fighting Falcon is slower than the Concorde.
+
+**Answer:** Yes
+
+Highlighted Text (correction markers in **bold**):
+[CLS] here is a question with a clear yes or no answer : is f - 16 fighting falcon slower than concorde ? it requires a few steps of reasoning . so first , think step by step , and only then give a yes / no answer . to determine if the f - 16 fighting falcon is slower than the concorde , we need to compare their maximum speeds . 1 . * * maximum speeds : * * - the f - 16 fighting falcon has a top speed of approximately 2 , 000 km / h ( 1 , 243 mph ) . - the concorde ' s maximum speed was around mach 2 . 02 at its cruising altitude , which translates to about 2 , 090 km / h ( 1 , 298 mph ) at sea level . 2 . * * comparison : * * - the f - 16 ' s top speed is significantly lower than the concorde ' s maximum speed . - therefore , it is true that the f - 16 fighting falcon is slower than the concorde . * * answer : * * yes [SEP]
+
+Top 10 Tokens by Attention:
+1. yes: 0.0945
+2. answer: 0.0689
+3. *: 0.0606
+4. .: 0.0591
+5. ): 0.0573
+6. *: 0.0514
+7. -: 0.0470
+8. *: 0.0427
+9. *: 0.0416
+10. *: 0.0410

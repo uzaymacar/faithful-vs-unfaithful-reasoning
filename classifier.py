@@ -1,90 +1,61 @@
-import json
+import argparse
 import os
 import random
+from collections import defaultdict
+from tqdm import tqdm
+from matplotlib import pyplot as plt
 import numpy as np
+
 import torch
 import torch.nn as nn
-import yaml
-import glob
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import Dataset, DataLoader
 from transformers import BertModel, BertTokenizer, get_linear_schedule_with_warmup
 from torch.optim import AdamW
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
-from tqdm import tqdm
 from transformer_lens import HookedTransformer
-from collections import defaultdict
-from matplotlib import pyplot as plt
+
+from utils import load_yaml_files, analyze_label_distribution
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='Train a classifier to distinguish faithful from unfaithful reasoning')
+    parser.add_argument('-m', '--model_name', type=str, default='qwen2.5-1.5b-instruct', choices=['qwen2.5-1.5b-instruct', 'llama-3.1-8b-instruct'], help='Name of the model to analyze (default: qwen2.5-1.5b-instruct)')
+    parser.add_argument('-a', '--activation_type', type=str, default='resid_post', choices=['resid_post', 'tokens'], help='Type of activations to use for classification (default: resid_post)')
+    parser.add_argument('-b', '--batch_size', type=int, default=8, help='Batch size for training (default: 8)')
+    parser.add_argument('-e', '--num_epochs', type=int, default=30, help='Number of training epochs (default: 30)')
+    parser.add_argument('-l', '--learning_rate', type=float, default=2e-5, help='Learning rate (default: 2e-5)')
+    parser.add_argument('-s', '--seed', type=int, default=42, help='Random seed for reproducibility (default: 42)')
+    parser.add_argument('-o', '--output_dir', type=str, default='figures', help='Directory to save output figures (default: figures)')
+    parser.add_argument('-d', '--model_dir', type=str, default='saved_models', help='Directory to save trained models (default: saved_models)')
+    parser.add_argument('-n', '--num_examples', type=int, default=None, help='Number of examples to use for training (default: None)')
+    return parser.parse_args()
+
+args = parse_args()
 
 # Set random seeds for reproducibility
-random.seed(42)
-np.random.seed(42)
-torch.manual_seed(42)
+random.seed(args.seed)
+np.random.seed(args.seed)
+torch.manual_seed(args.seed)
 if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(42)
+    torch.cuda.manual_seed_all(args.seed)
 
 # Device configuration
 device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
 print(f"Using device: {device}")
 
-# Function to load and process YAML files
-def load_yaml_files(data_dir):
-    yaml_files = glob.glob(os.path.join(data_dir, "*.yaml"))
-    print(f"Found {len(yaml_files)} YAML files in {data_dir}")
-    
-    all_cots = []
-    
-    for yaml_file in tqdm(yaml_files, desc="Loading YAML files"):
-        with open(yaml_file, 'r') as f:
-            data = yaml.safe_load(f)
-        
-        for example_id, example_data in data.items():
-            # Extract metadata
-            metadata = example_data.get('metadata', {})
-            prop_id = metadata.get('prop_id', '')
-            question = metadata.get('q_str', '')
-            prompt = example_data.get('prompt', '')
-            correct_answer = metadata.get('answer', '')
-            
-            # Process faithful responses
-            faithful_responses = example_data.get('faithful_responses', {})
-            for response_id, response_data in faithful_responses.items():
-                cot = {
-                    'example_id': example_id,
-                    'response_id': response_id,
-                    'question': question,
-                    'prop_id': prop_id,
-                    'ground_truth_answer': correct_answer,
-                    'response': response_data.get('response', ''),
-                    'final_answer': response_data.get('final_answer', ''),
-                    'result': response_data.get('result', ''),
-                    'is_faithful': True,
-                    'generated_cot': f"{prompt}{response_data.get('response', '')}"
-                }
-                all_cots.append(cot)
-                
-            # Process unfaithful responses (if any)
-            unfaithful_responses = example_data.get('unfaithful_responses', {})
-            for response_id, response_data in unfaithful_responses.items():
-                cot = {
-                    'example_id': example_id,
-                    'response_id': response_id,
-                    'question': question,
-                    'prop_id': prop_id,
-                    'ground_truth_answer': correct_answer,
-                    'response': response_data.get('response', ''),
-                    'final_answer': response_data.get('final_answer', ''),
-                    'result': response_data.get('result', ''),
-                    'is_faithful': False,
-                    'generated_cot': f"{prompt}{response_data.get('response', '')}"
-                }
-                all_cots.append(cot)
-    
-    return all_cots
+# Use the model name from arguments
+model_name = args.model_name
+data_dir = f'data/{model_name}'
+print(f"Using model: {model_name}")
+print(f"Loading data from: {data_dir}")
+
+# Create output directories with activation type
+os.makedirs(args.output_dir, exist_ok=True)
+os.makedirs(args.model_dir, exist_ok=True)
+os.makedirs(f"{args.output_dir}/classifier_{args.activation_type}", exist_ok=True)
+os.makedirs(f"{args.model_dir}/classifier_{args.activation_type}", exist_ok=True)
 
 # Load the CoT data from YAML files
-model_name = 'Llama-3.1-8B-Instruct'  # Change to 'Qwen2.5-1.5B-Instruct' for the other model
-data_dir = f'data/{model_name}'
-cots = load_yaml_files(data_dir)
+cots = load_yaml_files(data_dir)[0:args.num_examples]
 
 # Filter to only include examples with explicit faithfulness labels
 labeled_cots = [cot for cot in cots]
@@ -131,99 +102,15 @@ print(f"Train set balance: {sum(1 for cot in train_cots if cot['is_faithful'])}/
 print(f"Validation set balance: {sum(1 for cot in val_cots if cot['is_faithful'])}/{len(val_cots)}")
 print(f"Test set balance: {sum(1 for cot in test_cots if cot['is_faithful'])}/{len(test_cots)}")
 
-# Analyze distribution by property ID and question with respect to faithfulness
-def analyze_label_distribution(dataset, name):
-    # Track counts by property ID
-    prop_id_faithful = defaultdict(int)
-    prop_id_unfaithful = defaultdict(int)
-    prop_id_total = defaultdict(int)
-    
-    # Track counts by question
-    question_faithful = defaultdict(int)
-    question_unfaithful = defaultdict(int)
-    question_total = defaultdict(int)
-    
-    # Track counts by example ID
-    example_id_faithful = defaultdict(int)
-    example_id_unfaithful = defaultdict(int)
-    example_id_total = defaultdict(int)
-    
-    for cot in dataset:
-        # Get example ID
-        example_id = cot.get('example_id', 'unknown')
-        
-        # Get question
-        question = cot.get('question', 'unknown')
-        
-        # Get property ID if available
-        prop_id = cot.get('prop_id', 'unknown')
-        
-        # Update counts based on faithfulness
-        if cot.get('is_faithful', False):
-            prop_id_faithful[prop_id] += 1
-            question_faithful[question] += 1
-            example_id_faithful[example_id] += 1
-        else:
-            prop_id_unfaithful[prop_id] += 1
-            question_unfaithful[question] += 1
-            example_id_unfaithful[example_id] += 1
-        
-        # Update total counts
-        prop_id_total[prop_id] += 1
-        question_total[question] += 1
-        example_id_total[example_id] += 1
-    
-    print(f"\n{name} Set Label Distribution:")
-    print(f"Total examples: {len(dataset)}")
-    print(f"Faithful examples: {sum(prop_id_faithful.values())}")
-    print(f"Unfaithful examples: {sum(prop_id_unfaithful.values())}")
-    
-    # Print property ID distribution
-    print("\nProperty ID Distribution by Faithfulness:")
-    print("Property ID | Total | Faithful | Unfaithful | % Faithful")
-    print("-" * 60)
-    for prop_id in sorted(prop_id_total.keys()):
-        total = prop_id_total[prop_id]
-        faithful = prop_id_faithful[prop_id]
-        unfaithful = prop_id_unfaithful[prop_id]
-        percent_faithful = (faithful / total) * 100 if total > 0 else 0
-        print(f"{prop_id:12} | {total:5} | {faithful:8} | {unfaithful:10} | {percent_faithful:8.2f}%")
-    
-    # Print top 10 questions with most biased distribution
-    print("\nTop 10 Questions with Most Biased Distribution:")
-    print("Question | Total | Faithful | Unfaithful | % Faithful")
-    print("-" * 80)
-    
-    # Calculate bias as distance from 50%
-    question_bias = {}
-    for question, total in question_total.items():
-        if total >= 5:  # Only consider questions with at least 5 examples
-            faithful = question_faithful[question]
-            percent_faithful = (faithful / total) * 100
-            # Bias is distance from 50%
-            bias = abs(percent_faithful - 50)
-            question_bias[question] = bias
-    
-    # Print top biased questions
-    for question in sorted(question_bias.keys(), key=lambda q: question_bias[q], reverse=True)[:10]:
-        total = question_total[question]
-        faithful = question_faithful[question]
-        unfaithful = question_unfaithful[question]
-        percent_faithful = (faithful / total) * 100
-        
-        # Truncate long questions
-        q_display = question[:40] + "..." if len(question) > 40 else question
-        print(f"{q_display:50} | {total:5} | {faithful:8} | {unfaithful:10} | {percent_faithful:8.2f}%")
-
 # Analyze label distribution for each split
 analyze_label_distribution(train_cots, "Train")
 analyze_label_distribution(val_cots, "Validation")
 analyze_label_distribution(test_cots, "Test")
 
 # Load the appropriate model based on model_name
-if model_name == 'Qwen2.5-1.5B-Instruct':
+if model_name == 'qwen2.5-1.5b-instruct':
     model_path = 'Qwen/Qwen2.5-1.5B-Instruct'
-elif model_name == 'Llama-3.1-8B-Instruct':
+elif model_name == 'llama-3.1-8b-instruct':
     model_path = 'meta-llama/Llama-3.1-8B-Instruct'
 else:
     raise ValueError(f"Unsupported model: {model_name}")
@@ -233,44 +120,57 @@ llm_model = HookedTransformer.from_pretrained(model_path)
 llm_model = llm_model.to(device)
 llm_model.eval()  # Set to evaluation mode
 
-# Function to extract residual stream activations
-def extract_residual_activations(cot, model, layer_indices=None, max_length=512):
-    """Extract residual stream activations for a CoT example."""
+# Function to extract activations
+def extract_activations(cot, model, layer_indices=None, max_length=512):
+    """Extract activations for a CoT example based on specified activation type."""
     # If layer_indices is None, use all layers
     if layer_indices is None:
         layer_indices = list(range(model.cfg.n_layers))
     
     # Tokenize the CoT
     full_text = cot['generated_cot']
-    tokens = model.to_tokens(full_text, prepend_bos=True)
-    
-    # Truncate if too long
-    if tokens.shape[1] > max_length:
-        tokens = tokens[:, :max_length]
-    
-    # Run the model and cache activations
-    with torch.no_grad():
-        _, cache = model.run_with_cache(tokens)
-    
-    # Extract residual stream activations for specified layers
-    activations = []
-    for layer_idx in layer_indices:
-        layer_activations = cache[f'blocks.{layer_idx}.hook_resid_post']
-        activations.append(layer_activations)
-    
-    # Stack activations along a new dimension (layer)
-    stacked_activations = torch.stack(activations, dim=1)
-    
-    # Remove batch dimension (since we're processing one example at a time)
-    stacked_activations = stacked_activations.squeeze(0)
-    
-    return stacked_activations, tokens.shape[1] - 1  # -1 to exclude BOS token
+        
+    if args.activation_type == 'tokens':
+        # For token-based classification, use BERT tokenizer directly
+        tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+        
+        # Tokenize with BERT tokenizer
+        encoded = tokenizer(full_text, truncation=True, max_length=max_length, return_tensors='pt')
+        input_ids = encoded['input_ids']
+        attention_mask = encoded['attention_mask']
+        
+        return input_ids, attention_mask, input_ids.shape[1]
+    else:
+        tokens = model.to_tokens(full_text, prepend_bos=True)
+        
+        # Truncate if too long
+        if tokens.shape[1] > max_length:
+            tokens = tokens[:, :max_length]
+        
+        # Run the model and cache activations
+        with torch.no_grad():
+            _, cache = model.run_with_cache(tokens)
+        
+        # Extract residual stream activations for specified layers
+        activations = []
+        for layer_idx in layer_indices:
+            layer_activations = cache[f'blocks.{layer_idx}.hook_{args.activation_type}']
+            activations.append(layer_activations)
+        
+        # Stack activations along a new dimension (layer)
+        stacked_activations = torch.stack(activations, dim=1)
+        
+        # Remove batch dimension (since we're processing one example at a time)
+        stacked_activations = stacked_activations.squeeze(0)
+        
+        return stacked_activations, tokens.shape[1] - 1  # -1 to exclude BOS token
 
 # Define which layers to use for classification
+# NOTE: Layer indices were found empirically after training the model for a few iterations
 layer_indices = None
-if model_name == 'Qwen2.5-1.5B-Instruct':
+if model_name == 'qwen2.5-1.5b-instruct':
     layer_indices = [0, 5, 10, 15, 20, 25] 
-elif model_name == 'Llama-3.1-8B-Instruct':
+elif model_name == 'llama-3.1-8b-instruct':
     layer_indices = [12, 13, 14, 15, 16, 17]
 else:
     raise ValueError(f"Unsupported model: {model_name}")
@@ -281,36 +181,37 @@ print("Extracting activations...")
 train_activations = []
 for cot in tqdm(train_cots, desc="Extracting train activations"):
     try:
-        activations, seq_length = extract_residual_activations(cot, llm_model, layer_indices)
-        train_activations.append({
-            'activations': activations,
-            'label': 1 if cot['is_faithful'] else 0,
-            'seq_length': seq_length
-        })
+        if args.activation_type == 'tokens':
+            input_ids, attention_mask, seq_length = extract_activations(cot, llm_model, layer_indices)
+            train_activations.append({'input_ids': input_ids, 'attention_mask': attention_mask, 'label': 1 if cot['is_faithful'] else 0, 'seq_length': seq_length})
+        else:
+            activations, seq_length = extract_activations(cot, llm_model, layer_indices)
+            train_activations.append({'activations': activations, 'label': 1 if cot['is_faithful'] else 0, 'seq_length': seq_length})
     except Exception as e:
         print(f"Error processing example {cot['example_id']}: {e}")
 
 val_activations = []
 for cot in tqdm(val_cots, desc="Extracting validation activations"):
     try:
-        activations, seq_length = extract_residual_activations(cot, llm_model, layer_indices)
-        val_activations.append({
-            'activations': activations,
-            'label': 1 if cot['is_faithful'] else 0,
-            'seq_length': seq_length
-        })
+        if args.activation_type == 'tokens':
+            input_ids, attention_mask, seq_length = extract_activations(cot, llm_model, layer_indices)
+            val_activations.append({'input_ids': input_ids, 'attention_mask': attention_mask, 'label': 1 if cot['is_faithful'] else 0, 'seq_length': seq_length})
+        else:
+            activations, seq_length = extract_activations(cot, llm_model, layer_indices)
+            val_activations.append({'activations': activations, 'label': 1 if cot['is_faithful'] else 0, 'seq_length': seq_length})
     except Exception as e:
         print(f"Error processing example {cot['example_id']}: {e}")
 
 test_activations = []
 for cot in tqdm(test_cots, desc="Extracting test activations"):
     try:
-        activations, seq_length = extract_residual_activations(cot, llm_model, layer_indices)
-        test_activations.append({
-            'activations': activations,
-            'label': 1 if cot['is_faithful'] else 0,
-            'seq_length': seq_length
-        })
+        if args.activation_type == 'tokens':
+            input_ids, attention_mask, seq_length = extract_activations(cot, llm_model, layer_indices)
+            test_activations.append({'input_ids': input_ids, 'attention_mask': attention_mask, 'label': 1 if cot['is_faithful'] else 0, 'seq_length': seq_length})
+        else:
+            activations, seq_length = extract_activations(cot, llm_model, layer_indices)
+            test_activations.append({'activations': activations, 'label': 1 if cot['is_faithful'] else 0, 'seq_length': seq_length })
+
     except Exception as e:
         print(f"Error processing example {cot['example_id']}: {e}")
 
@@ -333,63 +234,80 @@ def collate_fn(batch):
     if len(batch) == 0:
         return {'activations': torch.tensor([]), 'label': torch.tensor([]), 'seq_length': []}
     
-    # Find max sequence length in the batch
-    max_seq_len = max(item['activations'].shape[1] for item in batch)
-    
-    # Get other dimensions
-    batch_size = len(batch)
-    
-    num_layers = batch[0]['activations'].shape[0]
-    hidden_dim = batch[0]['activations'].shape[2]
-    
-    # Initialize tensors
-    activations = torch.zeros(batch_size, num_layers, max_seq_len, hidden_dim)
-    labels = torch.zeros(batch_size, dtype=torch.long)
-    seq_lengths = []
-    
-    # Fill tensors
-    for i, item in enumerate(batch):
-        seq_len = item['activations'].shape[1]
-        activations[i, :, :seq_len, :] = item['activations'][:, :seq_len, :]
-        labels[i] = item['label']
-        seq_lengths.append(seq_len)
-    
-    return {
-        'activations': activations,
-        'label': labels,
-        'seq_length': seq_lengths
-    }
+    if args.activation_type == 'tokens':
+        # For token-based approach
+        input_ids = [item['input_ids'] for item in batch]
+        attention_masks = [item['attention_mask'] for item in batch]
+        labels = [item['label'] for item in batch]
+        
+        # Pad sequences
+        max_len = max(ids.shape[1] for ids in input_ids)
+        
+        padded_ids = torch.zeros(len(batch), max_len, dtype=torch.long)
+        padded_masks = torch.zeros(len(batch), max_len, dtype=torch.long)
+        label_tensor = torch.zeros(len(batch), dtype=torch.long)
+        
+        for i, (ids, mask, label) in enumerate(zip(input_ids, attention_masks, labels)):
+            seq_len = ids.shape[1]
+            padded_ids[i, :seq_len] = ids[0, :seq_len]
+            padded_masks[i, :seq_len] = mask[0, :seq_len]
+            label_tensor[i] = label
+        
+        return {
+            'input_ids': padded_ids,
+            'attention_mask': padded_masks,
+            'label': label_tensor
+        }
+    else:
+        # Original collate function for residual activations
+        # Find max sequence length in the batch
+        max_seq_len = max(item['activations'].shape[1] for item in batch)
+        
+        # Get other dimensions
+        batch_size = len(batch)
+        num_layers = batch[0]['activations'].shape[0]
+        hidden_dim = batch[0]['activations'].shape[2]
+        
+        # Initialize tensors
+        activations = torch.zeros(batch_size, num_layers, max_seq_len, hidden_dim)
+        labels = torch.zeros(batch_size, dtype=torch.long)
+        seq_lengths = []
+        
+        # Fill tensors
+        for i, item in enumerate(batch):
+            seq_len = item['activations'].shape[1]
+            activations[i, :, :seq_len, :] = item['activations'][:, :seq_len, :]
+            labels[i] = item['label']
+            seq_lengths.append(seq_len)
+        
+        return {
+            'activations': activations,
+            'label': labels,
+            'seq_length': seq_lengths
+        }
 
 # Create datasets and dataloaders
 train_dataset = Dataset(train_activations)
 val_dataset = Dataset(val_activations)
 test_dataset = Dataset(test_activations)
 
-batch_size = 8
+batch_size = args.batch_size
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
 val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
 test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
 
 # Define the classifier model
 class Classifier(nn.Module):
-    def __init__(self, input_dim, projection_dim=768, use_dim_reduction=False):
+    def __init__(self, input_dim, projection_dim=768):
         super(Classifier, self).__init__()
-        self.bert = BertModel.from_pretrained('bert-base-uncased')
-        self.use_dim_reduction = use_dim_reduction
         self.projection_dim = projection_dim
+        self.bert = BertModel.from_pretrained('bert-base-uncased')
         
-        if self.use_dim_reduction:
-            # For bigger models (e.g. Llama): add dimension reduction before projection
-            self.dim_reduction = nn.Linear(input_dim, projection_dim)
-            self.dropout = nn.Dropout(0.1)
-            self.projection = nn.Linear(projection_dim * len(layer_indices), projection_dim)
-        else:
-            # For smaller models (e.g. Qwen): keep original architecture exactly the same
+        if args.activation_type != 'tokens':            
             self.projection = nn.Linear(input_dim * len(layer_indices), projection_dim)
-            
-        print(f"Classifier Projection Layer Shape: {self.projection.weight.shape}")
+            print(f"Classifier projection layer shape: {self.projection.weight.shape}")
         
-        # Classification head - keep exactly the same for both types
+        # Classification head
         self.classifier = nn.Sequential(
             nn.Linear(projection_dim, projection_dim),
             nn.ReLU(),
@@ -397,54 +315,34 @@ class Classifier(nn.Module):
             nn.Linear(projection_dim, 2)  # Binary classification
         )
     
-    def forward(self, activations, attention_mask=None):
-        # activations shape: [batch_size, num_layers, seq_len, hidden_dim]
-        batch_size, num_layers, seq_len, hidden_dim = activations.shape
-        
-        if self.use_dim_reduction:
-            # For bigger models (e.g. Llama): First reduce dimension of each layer
-            # Process each layer separately
-            reduced_layers = []
-            for i in range(num_layers):
-                layer_activations = activations[:, i, :, :]  # [batch_size, seq_len, hidden_dim]
-                # Reshape to [batch_size * seq_len, hidden_dim]
-                reshaped = layer_activations.reshape(batch_size * seq_len, hidden_dim)
-                # Reduce dimension
-                reduced = self.dim_reduction(reshaped)
-                reduced = self.dropout(reduced)
-                # Reshape back to [batch_size, seq_len, reduced_dim]
-                reduced = reduced.reshape(batch_size, seq_len, -1)
-                reduced_layers.append(reduced)
-            
-            # Concatenate reduced layers along a new dimension
-            # Shape: [batch_size, seq_len, num_layers, reduced_dim]
-            stacked = torch.stack(reduced_layers, dim=2)
-            
-            # Reshape to [batch_size * seq_len, num_layers * reduced_dim]
-            reshaped = stacked.reshape(batch_size * seq_len, num_layers * self.projection_dim)
-            
-            # Project to BERT input dimension
-            projected = self.projection(reshaped)
-        else:
-            # For smaller models (e.g. Qwen): Exactly the same as original
+    def forward(self, x, attention_mask=None):
+        if args.activation_type == 'tokens':
+            # For token-based classification, x is input_ids
+            outputs = self.bert(input_ids=x, attention_mask=attention_mask)
+            cls_output = outputs.last_hidden_state[:, 0, :]
+        else: 
+            # Original forward pass for residual stream activations
+            activations = x  # Rename for clarity
+            batch_size, num_layers, seq_len, hidden_dim = activations.shape
+            # For Qwen: Exactly the same as original
             # Reshape to [batch_size * seq_len, num_layers * hidden_dim]
             activations = activations.permute(0, 2, 1, 3).reshape(batch_size * seq_len, num_layers * hidden_dim)
             
             # Project to BERT input dimension
             projected = self.projection(activations)
-        
-        # Reshape back to [batch_size, seq_len, hidden_dim]
-        projected = projected.reshape(batch_size, seq_len, -1)
-        
-        # Create attention mask if not provided
-        if attention_mask is None:
-            attention_mask = torch.ones(batch_size, seq_len, device=activations.device)
-        
-        # Pass through BERT
-        outputs = self.bert(inputs_embeds=projected, attention_mask=attention_mask)
-        
-        # Use the [CLS] token representation for classification
-        cls_output = outputs.last_hidden_state[:, 0, :]
+            
+            # Reshape back to [batch_size, seq_len, hidden_dim]
+            projected = projected.reshape(batch_size, seq_len, -1)
+            
+            # Create attention mask if not provided
+            if attention_mask is None:
+                attention_mask = torch.ones(batch_size, seq_len, device=activations.device)
+            
+            # Pass through BERT
+            outputs = self.bert(inputs_embeds=projected, attention_mask=attention_mask)
+            
+            # Use the [CLS] token representation for classification
+            cls_output = outputs.last_hidden_state[:, 0, :]
         
         # Pass through classification head
         logits = self.classifier(cls_output)
@@ -452,14 +350,14 @@ class Classifier(nn.Module):
         return logits
 
 # Initialize the classifier
-big_models = ['Llama-3.1-8B-Instruct']
 hidden_dim = llm_model.cfg.d_model
-projection_dim = llm_model.cfg.d_model
-classifier = Classifier(input_dim=hidden_dim, projection_dim=projection_dim, use_dim_reduction=False).to(device)
+projection_dim = 768
+print(f"Projection dim: {projection_dim}")
+classifier = Classifier(input_dim=hidden_dim, projection_dim=projection_dim).to(device)
 
 # Training parameters
-num_epochs = 30
-learning_rate = 2e-5
+num_epochs = args.num_epochs
+learning_rate = args.learning_rate
 weight_decay = 0.01
 
 # Loss function and optimizer
@@ -468,47 +366,47 @@ optimizer = AdamW(classifier.parameters(), lr=learning_rate, weight_decay=weight
 
 # Learning rate scheduler
 total_steps = len(train_loader) * num_epochs
-scheduler = get_linear_schedule_with_warmup(
-    optimizer,
-    num_warmup_steps=int(0.1 * total_steps),
-    num_training_steps=total_steps
-)
+scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=int(0.1 * total_steps), num_training_steps=total_steps)
 
 # Training loop
 best_val_accuracy = 0.0
 best_model = None
 
 # Track metrics for plotting
-train_losses = []
-train_accuracies = []
-val_losses = []
-val_accuracies = []
+train_losses, train_accuracies, val_losses, val_accuracies = [], [], [], []
 
 print("Starting training...")
 for epoch in range(num_epochs):
     # Training
     classifier.train()
     train_loss = 0.0
-    train_preds = []
-    train_labels = []
+    train_preds, train_labels = [], []
     
     for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} - Training"):
         # Move batch to device
-        activations = batch['activations'].to(device)
-        labels = batch['label'].to(device)
-        seq_lengths = batch['seq_length']
-        
-        # Create attention mask based on sequence lengths
-        attention_mask = torch.zeros(activations.shape[0], activations.shape[2], device=device)
-        for i, length in enumerate(seq_lengths):
-            attention_mask[i, :length] = 1
-        
-        # Forward pass
-        outputs = classifier(activations, attention_mask)
-        loss = criterion(outputs, labels)
+        if args.activation_type == 'tokens':
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            labels = batch['label'].to(device)
+            
+            # Forward pass
+            outputs = classifier(input_ids, attention_mask)
+        else:
+            activations = batch['activations'].to(device)
+            labels = batch['label'].to(device)
+            seq_lengths = batch['seq_length']
+            
+            # Create attention mask based on sequence lengths
+            attention_mask = torch.zeros(activations.shape[0], activations.shape[2], device=device)
+            for i, length in enumerate(seq_lengths):
+                attention_mask[i, :length] = 1
+            
+            # Forward pass
+            outputs = classifier(activations, attention_mask)
         
         # Backward pass and optimize
         optimizer.zero_grad()
+        loss = criterion(outputs, labels)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(classifier.parameters(), 1.0)
         optimizer.step()
@@ -532,27 +430,33 @@ for epoch in range(num_epochs):
     # Validation
     classifier.eval()
     val_loss = 0.0
-    val_preds = []
-    val_labels = []
+    val_preds, val_labels = [], []
     
     with torch.no_grad():
         for batch in tqdm(val_loader, desc=f"Epoch {epoch+1}/{num_epochs} - Validation"):
             # Move batch to device
-            activations = batch['activations'].to(device)
-            labels = batch['label'].to(device)
-            seq_lengths = batch['seq_length']
-            
-            # Create attention mask based on sequence lengths
-            attention_mask = torch.zeros(activations.shape[0], activations.shape[2], device=device)
-            for i, length in enumerate(seq_lengths):
-                attention_mask[i, :length] = 1
-            
-            # Forward pass
-            outputs = classifier(activations, attention_mask)
-            loss = criterion(outputs, labels)
+            if args.activation_type == 'tokens':
+                input_ids = batch['input_ids'].to(device)
+                attention_mask = batch['attention_mask'].to(device)
+                labels = batch['label'].to(device)
+                
+                # Forward pass
+                outputs = classifier(input_ids, attention_mask)
+            else:
+                activations = batch['activations'].to(device)
+                labels = batch['label'].to(device)
+                seq_lengths = batch['seq_length']
+                
+                # Create attention mask based on sequence lengths
+                attention_mask = torch.zeros(activations.shape[0], activations.shape[2], device=device)
+                for i, length in enumerate(seq_lengths):
+                    attention_mask[i, :length] = 1
+                
+                # Forward pass
+                outputs = classifier(activations, attention_mask)
             
             # Track metrics
-            val_loss += loss.item()
+            val_loss += criterion(outputs, labels).item()
             _, preds = torch.max(outputs, 1)
             val_preds.extend(preds.cpu().numpy())
             val_labels.extend(labels.cpu().numpy())
@@ -599,10 +503,10 @@ plt.title('Training and Validation Accuracy')
 plt.legend()
 
 plt.tight_layout()
-plt.savefig(f'figures/classifier/{model_name.lower()}_training_curves.png')
+plt.savefig(f'{args.output_dir}/classifier_{args.activation_type}/{model_name.lower()}_training_curves.png')
 plt.show()
 
-print(f"Training curves saved to figures/classifier/{model_name.lower()}_training_curves.png")
+print(f"Training curves saved to {args.output_dir}/classifier_{args.activation_type}/{model_name.lower()}_training_curves.png")
 
 # Load best model for evaluation
 classifier.load_state_dict(best_model)
@@ -615,17 +519,26 @@ test_labels = []
 with torch.no_grad():
     for batch in tqdm(test_loader, desc="Testing"):
         # Move batch to device
-        activations = batch['activations'].to(device)
-        labels = batch['label'].to(device)
-        seq_lengths = batch['seq_length']
+        if args.activation_type == 'tokens':
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            labels = batch['label'].to(device)
+            
+            # Forward pass
+            outputs = classifier(input_ids, attention_mask)
+        else:
+            activations = batch['activations'].to(device)
+            labels = batch['label'].to(device)
+            seq_lengths = batch['seq_length']
+            
+            # Create attention mask based on sequence lengths
+            attention_mask = torch.zeros(activations.shape[0], activations.shape[2], device=device)
+            for i, length in enumerate(seq_lengths):
+                attention_mask[i, :length] = 1
+            
+            # Forward pass
+            outputs = classifier(activations, attention_mask)
         
-        # Create attention mask based on sequence lengths
-        attention_mask = torch.zeros(activations.shape[0], activations.shape[2], device=device)
-        for i, length in enumerate(seq_lengths):
-            attention_mask[i, :length] = 1
-        
-        # Forward pass
-        outputs = classifier(activations, attention_mask)
         _, preds = torch.max(outputs, 1)
         test_preds.extend(preds.cpu().numpy())
         test_labels.extend(labels.cpu().numpy())
@@ -641,8 +554,8 @@ print(f"Recall: {test_recall:.4f}")
 print(f"F1 Score: {test_f1:.4f}")
 
 # Save the model with model name in the filename
-os.makedirs('saved_models/classifier', exist_ok=True)
-model_filename = f'saved_models/classifier/{model_name.lower()}_{"_".join(str(i) for i in layer_indices)}.pt'
+os.makedirs(f'{args.model_dir}/classifier_{args.activation_type}', exist_ok=True)
+model_filename = f'{args.model_dir}/classifier_{args.activation_type}/{model_name.lower()}_{"_".join(str(i) for i in layer_indices)}.pt'
 torch.save(classifier.state_dict(), model_filename)
 print(f"Model saved to {model_filename}")
 
@@ -712,42 +625,34 @@ def analyze_feature_importance(model, dataloader, device):
     for pos in position_importance:
         position_importance[pos] /= num_batches
     
-    return {
-        'layer_importance': layer_importance.cpu().numpy(),
-        'position_importance': dict(position_importance)
-    }
+    return { 'layer_importance': layer_importance.cpu().numpy(), 'position_importance': dict(position_importance) }
 
 # Run feature importance analysis
-print("\nAnalyzing feature importance...")
-os.makedirs('figures/classifier', exist_ok=True)
-importance_results = analyze_feature_importance(classifier, test_loader, device)
+if args.activation_type != 'tokens':
+    print("\nAnalyzing feature importance...")
+    os.makedirs(f'{args.output_dir}/classifier_{args.activation_type}', exist_ok=True)
+    importance_results = analyze_feature_importance(classifier, test_loader, device)
 
-# Plot layer importance
-plt.figure(figsize=(10, 6))
-plt.bar(
-    [f"Layer {layer_indices[i]}" for i in range(len(layer_indices))],
-    importance_results['layer_importance']
-)
-plt.xlabel('Layer')
-plt.ylabel('Importance Score')
-plt.title('Layer Importance for Faithful versus Unfaithful Classification')
-plt.xticks(rotation=45)
-plt.tight_layout()
-plt.savefig(f'figures/classifier/{model_name.lower()}_layer_importance.png')
-plt.show()
+    # Plot layer importance
+    plt.figure(figsize=(10, 6))
+    plt.bar([f"Layer {layer_indices[i]}" for i in range(len(layer_indices))], importance_results['layer_importance'])
+    plt.xlabel('Layer')
+    plt.ylabel('Importance Score')
+    plt.title('Layer Importance for Faithful versus Unfaithful Classification')
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.savefig(f'{args.output_dir}/classifier_{args.activation_type}/{model_name.lower()}_layer_importance.png')
+    plt.show()
 
-# Plot position importance
-plt.figure(figsize=(10, 6))
-positions = sorted(importance_results['position_importance'].keys())
-plt.bar(
-    [f"Pos {pos}" for pos in positions],
-    [importance_results['position_importance'][pos] for pos in positions]
-)
-plt.xlabel('Position')
-plt.ylabel('Importance Score')
-plt.title('Position Importance for Faithful versus Unfaithful Classification')
-plt.tight_layout()
-plt.savefig(f'figures/classifier/{model_name.lower()}_position_importance.png')
-plt.show()
+    # Plot position importance
+    plt.figure(figsize=(10, 6))
+    positions = sorted(importance_results['position_importance'].keys())
+    plt.bar([f"Pos {pos}" for pos in positions], [importance_results['position_importance'][pos] for pos in positions])
+    plt.xlabel('Position')
+    plt.ylabel('Importance Score')
+    plt.title('Position Importance for Faithful versus Unfaithful Classification')
+    plt.tight_layout()
+    plt.savefig(f'{args.output_dir}/classifier_{args.activation_type}/{model_name.lower()}_position_importance.png')
+    plt.show()
 
-print(f"Analysis complete. Results saved to figures/classifier/{model_name.lower()}_layer_importance.png and figures/classifier/{model_name.lower()}_position_importance.png")
+    print(f"Analysis complete. Results saved to {args.output_dir}/classifier_{args.activation_type}/{model_name.lower()}_layer_importance.png and {args.output_dir}/classifier_{args.activation_type}/{model_name.lower()}_position_importance.png")
