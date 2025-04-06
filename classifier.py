@@ -88,7 +88,6 @@ cots = load_yaml_files(data_dir)
 
 # Filter to only include examples with explicit faithfulness labels
 labeled_cots = [cot for cot in cots]
-
 faithful_cots = [cot for cot in labeled_cots if cot['is_faithful'] == True]
 unfaithful_cots = [cot for cot in labeled_cots if cot['is_faithful'] == False]
 print(f"Total labeled CoTs: {len(labeled_cots)}")
@@ -272,7 +271,10 @@ layer_indices = None
 if model_name == 'Qwen2.5-1.5B-Instruct':
     layer_indices = [0, 5, 10, 15, 20, 25] 
 elif model_name == 'Llama-3.1-8B-Instruct':
-    layer_indices = [0, 7, 14, 21, 28]
+    # layer_indices = [6, 7, 8, 9, 10, 11] # Kinda worked well, first time (80% val acc but high val loss)
+    # layer_indices = [12, 13, 14, 15, 16, 17] # This worked good, second time (83% val acc but still somewhat high val loss)
+    # layer_indices = [18, 19, 20, 21, 22, 23]
+    layer_indices = [12, 13, 15, 16, 17, 18]
 else:
     raise ValueError(f"Unsupported model: {model_name}")
 print(f"Using layers: {layer_indices}")
@@ -380,6 +382,7 @@ class Classifier(nn.Module):
         # Projection layer to map residual stream to BERT input dimension
         # Adjust the input dimension to account for multiple layers
         self.projection = nn.Linear(input_dim * len(layer_indices), hidden_dim)
+        print(f"Classifier Projection Layer Shape: {self.projection.weight.shape}")
         
         # Classification head
         self.classifier = nn.Sequential(
@@ -563,10 +566,10 @@ plt.title('Training and Validation Accuracy')
 plt.legend()
 
 plt.tight_layout()
-plt.savefig(f'figures/{model_name.lower()}_training_curves.png')
+plt.savefig(f'figures/classifier/{model_name.lower()}_training_curves.png')
 plt.show()
 
-print(f"Training curves saved to figures/{model_name.lower()}_training_curves.png")
+print(f"Training curves saved to figures/classifier/{model_name.lower()}_training_curves.png")
 
 # Load best model for evaluation
 classifier.load_state_dict(best_model)
@@ -605,8 +608,8 @@ print(f"Recall: {test_recall:.4f}")
 print(f"F1 Score: {test_f1:.4f}")
 
 # Save the model with model name in the filename
-os.makedirs('saved_models', exist_ok=True)
-model_filename = f'saved_models/faithful_unfaithful_classifier_{model_name.lower()}_{"_".join(str(i) for i in layer_indices)}.pt'
+os.makedirs('saved_models/classifier', exist_ok=True)
+model_filename = f'saved_models/classifier/{model_name.lower()}_{"_".join(str(i) for i in layer_indices)}.pt'
 torch.save(classifier.state_dict(), model_filename)
 print(f"Model saved to {model_filename}")
 
@@ -683,7 +686,7 @@ def analyze_feature_importance(model, dataloader, device):
 
 # Run feature importance analysis
 print("\nAnalyzing feature importance...")
-os.makedirs('figures', exist_ok=True)
+os.makedirs('figures/classifier', exist_ok=True)
 importance_results = analyze_feature_importance(classifier, test_loader, device)
 
 # Plot layer importance
@@ -697,7 +700,7 @@ plt.ylabel('Importance Score')
 plt.title('Layer Importance for Faithful versus Unfaithful Classification')
 plt.xticks(rotation=45)
 plt.tight_layout()
-plt.savefig(f'figures/{model_name.lower()}_layer_importance.png')
+plt.savefig(f'figures/classifier/{model_name.lower()}_layer_importance.png')
 plt.show()
 
 # Plot position importance
@@ -711,7 +714,7 @@ plt.xlabel('Position')
 plt.ylabel('Importance Score')
 plt.title('Position Importance for Faithful versus Unfaithful Classification')
 plt.tight_layout()
-plt.savefig(f'figures/{model_name.lower()}_position_importance.png')
+plt.savefig(f'figures/classifier/{model_name.lower()}_position_importance.png')
 plt.show()
 
-print(f"Analysis complete. Results saved to figures/{model_name.lower()}_layer_importance.png and figures/{model_name.lower()}_position_importance.png")
+print(f"Analysis complete. Results saved to figures/classifier/{model_name.lower()}_layer_importance.png and figures/classifier/{model_name.lower()}_position_importance.png")
