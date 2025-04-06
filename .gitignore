@@ -1,1 +1,5 @@
 __pycache__/
+openai_key.txt
+script
+mem.py
+cuda_visible_devices.txt
