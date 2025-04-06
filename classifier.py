@@ -271,10 +271,7 @@ layer_indices = None
 if model_name == 'Qwen2.5-1.5B-Instruct':
     layer_indices = [0, 5, 10, 15, 20, 25] 
 elif model_name == 'Llama-3.1-8B-Instruct':
-    # layer_indices = [6, 7, 8, 9, 10, 11] # Kinda worked well, first time (80% val acc but high val loss)
-    # layer_indices = [12, 13, 14, 15, 16, 17] # This worked good, second time (83% val acc but still somewhat high val loss)
-    # layer_indices = [18, 19, 20, 21, 22, 23]
-    layer_indices = [12, 13, 15, 16, 17, 18]
+    layer_indices = [12, 13, 14, 15, 16, 17]
 else:
     raise ValueError(f"Unsupported model: {model_name}")
 print(f"Using layers: {layer_indices}")
@@ -375,32 +372,66 @@ test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, col
 
 # Define the classifier model
 class Classifier(nn.Module):
-    def __init__(self, input_dim, hidden_dim=768):
+    def __init__(self, input_dim, projection_dim=768, use_dim_reduction=False):
         super(Classifier, self).__init__()
         self.bert = BertModel.from_pretrained('bert-base-uncased')
+        self.use_dim_reduction = use_dim_reduction
+        self.projection_dim = projection_dim
         
-        # Projection layer to map residual stream to BERT input dimension
-        # Adjust the input dimension to account for multiple layers
-        self.projection = nn.Linear(input_dim * len(layer_indices), hidden_dim)
+        if self.use_dim_reduction:
+            # For bigger models (e.g. Llama): add dimension reduction before projection
+            self.dim_reduction = nn.Linear(input_dim, projection_dim)
+            self.dropout = nn.Dropout(0.1)
+            self.projection = nn.Linear(projection_dim * len(layer_indices), projection_dim)
+        else:
+            # For smaller models (e.g. Qwen): keep original architecture exactly the same
+            self.projection = nn.Linear(input_dim * len(layer_indices), projection_dim)
+            
         print(f"Classifier Projection Layer Shape: {self.projection.weight.shape}")
         
-        # Classification head
+        # Classification head - keep exactly the same for both types
         self.classifier = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(projection_dim, projection_dim),
             nn.ReLU(),
             nn.Dropout(0.1),
-            nn.Linear(hidden_dim, 2)  # Binary classification
+            nn.Linear(projection_dim, 2)  # Binary classification
         )
     
     def forward(self, activations, attention_mask=None):
         # activations shape: [batch_size, num_layers, seq_len, hidden_dim]
         batch_size, num_layers, seq_len, hidden_dim = activations.shape
         
-        # Reshape to [batch_size * seq_len, num_layers * hidden_dim]
-        activations = activations.permute(0, 2, 1, 3).reshape(batch_size * seq_len, num_layers * hidden_dim)
-        
-        # Project to BERT input dimension
-        projected = self.projection(activations)
+        if self.use_dim_reduction:
+            # For bigger models (e.g. Llama): First reduce dimension of each layer
+            # Process each layer separately
+            reduced_layers = []
+            for i in range(num_layers):
+                layer_activations = activations[:, i, :, :]  # [batch_size, seq_len, hidden_dim]
+                # Reshape to [batch_size * seq_len, hidden_dim]
+                reshaped = layer_activations.reshape(batch_size * seq_len, hidden_dim)
+                # Reduce dimension
+                reduced = self.dim_reduction(reshaped)
+                reduced = self.dropout(reduced)
+                # Reshape back to [batch_size, seq_len, reduced_dim]
+                reduced = reduced.reshape(batch_size, seq_len, -1)
+                reduced_layers.append(reduced)
+            
+            # Concatenate reduced layers along a new dimension
+            # Shape: [batch_size, seq_len, num_layers, reduced_dim]
+            stacked = torch.stack(reduced_layers, dim=2)
+            
+            # Reshape to [batch_size * seq_len, num_layers * reduced_dim]
+            reshaped = stacked.reshape(batch_size * seq_len, num_layers * self.projection_dim)
+            
+            # Project to BERT input dimension
+            projected = self.projection(reshaped)
+        else:
+            # For smaller models (e.g. Qwen): Exactly the same as original
+            # Reshape to [batch_size * seq_len, num_layers * hidden_dim]
+            activations = activations.permute(0, 2, 1, 3).reshape(batch_size * seq_len, num_layers * hidden_dim)
+            
+            # Project to BERT input dimension
+            projected = self.projection(activations)
         
         # Reshape back to [batch_size, seq_len, hidden_dim]
         projected = projected.reshape(batch_size, seq_len, -1)
@@ -421,8 +452,10 @@ class Classifier(nn.Module):
         return logits
 
 # Initialize the classifier
+big_models = ['Llama-3.1-8B-Instruct']
 hidden_dim = llm_model.cfg.d_model
-classifier = Classifier(hidden_dim).to(device)
+projection_dim = llm_model.cfg.d_model
+classifier = Classifier(input_dim=hidden_dim, projection_dim=projection_dim, use_dim_reduction=False).to(device)
 
 # Training parameters
 num_epochs = 30
