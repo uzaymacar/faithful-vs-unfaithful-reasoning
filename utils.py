@@ -91,6 +91,57 @@ def load_yaml_files(data_dir):
     
     return all_cots
 
+def analyze_yes_no_gt_balance(cots, name):
+    """Analyze the balance of YES/NO answers in the dataset."""
+    yes_count = 0
+    no_count = 0
+    
+    # Count YES/NO answers
+    for cot in cots:
+        # Check if the answer field exists
+        if 'ground_truth_answer' in cot:
+            answer = cot['ground_truth_answer'].strip().upper()
+            if answer == 'YES':
+                yes_count += 1
+            elif answer == 'NO':
+                no_count += 1
+    
+    total = yes_count + no_count
+    
+    # Print results
+    print(f"\n{name} YES/NO Ground Truth Answer Balance:")
+    print(f"  YES: {yes_count} ({yes_count/total*100:.1f}%)")
+    print(f"  NO: {no_count} ({no_count/total*100:.1f}%)")
+    print(f"  Total: {total}")
+    
+    return {'yes': yes_count, 'no': no_count, 'total': total}
+
+def analyze_yes_no_response_balance(cots, name):
+    """Analyze the balance of YES/NO answers in the dataset."""
+    yes_count = 0
+    no_count = 0
+    
+    # Count YES/NO answers
+    for cot in cots:
+        # Check if the answer field exists
+        if 'final_answer' in cot:
+            answer = cot['final_answer'].strip().upper()
+            if answer == 'YES':
+                yes_count += 1
+            elif answer == 'NO':
+                no_count += 1
+    
+    total = yes_count + no_count
+    
+    # Print results
+    print(f"\n{name} YES/NO Model Response Answer Balance:")
+    print(f"  YES: {yes_count} ({yes_count/total*100:.1f}%)")
+    print(f"  NO: {no_count} ({no_count/total*100:.1f}%)")
+    print(f"  Total: {total}")
+    
+    return {'yes': yes_count, 'no': no_count, 'total': total}
+
+
 def analyze_label_distribution(dataset, name):
     """Analyze distribution by property ID and question with respect to faithfulness"""
     # Track counts by property ID

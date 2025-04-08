@@ -14,7 +14,7 @@ from torch.optim import AdamW
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 from transformer_lens import HookedTransformer
 
-from utils import load_yaml_files, analyze_label_distribution
+from utils import load_yaml_files, analyze_label_distribution, analyze_yes_no_gt_balance, analyze_yes_no_response_balance
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a classifier to distinguish faithful from unfaithful reasoning')
@@ -106,6 +106,15 @@ print(f"Test set balance: {sum(1 for cot in test_cots if cot['is_faithful'])}/{l
 analyze_label_distribution(train_cots, "Train")
 analyze_label_distribution(val_cots, "Validation")
 analyze_label_distribution(test_cots, "Test")
+
+# Analyze YES/NO balance for each split
+analyze_yes_no_gt_balance(train_cots, "Train")
+analyze_yes_no_gt_balance(val_cots, "Validation")
+analyze_yes_no_gt_balance(test_cots, "Test")
+
+analyze_yes_no_response_balance(train_cots, "Train")
+analyze_yes_no_response_balance(val_cots, "Validation")
+analyze_yes_no_response_balance(test_cots, "Test")
 
 # Load the appropriate model based on model_name
 if model_name == 'qwen2.5-1.5b-instruct':
